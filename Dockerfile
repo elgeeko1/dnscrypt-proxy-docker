@@ -1,9 +1,12 @@
+# syntax=docker/dockerfile:1
+
 ##################
 ## base stage
 ##################
 FROM ubuntu:jammy AS BASE
 
-ARG DNSCRYPT_PROXY_VER=2.1.4
+ARG TARGETARCH
+ARG DNSCRYPT_PROXY_VER=2.1.5
 
 USER root
 
@@ -22,14 +25,19 @@ RUN apt-get install --no-install-recommends -y -q apt-utils 2>&1 \
 	| grep -v "debconf: delaying package configuration"
 RUN apt-get install --no-install-recommends -y -q ca-certificates
 
+# archive URIs
+ENV ARCHIVE_AMD64_NAME=dnscrypt-proxy-linux_x86_64-${DNSCRYPT_PROXY_VER}.tar.gz
+ENV ARCHIVE_ARM64_NAME=dnscrypt-proxy-linux_arm64-${DNSCRYPT_PROXY_VER}.tar.gz
+
 # install dnscrypt-proxy
-# Ubuntu repositories tend to have an older version, so install from github
 RUN mkdir -p /tmp/dnscrypt-proxy
-ENV DNSCRYPT_ARCHIVE=dnscrypt-proxy-linux_x86_64-${DNSCRYPT_PROXY_VER}.tar.gz
-ADD https://github.com/DNSCrypt/dnscrypt-proxy/releases/download/${DNSCRYPT_PROXY_VER}/${DNSCRYPT_ARCHIVE} /tmp/dnscrypt-proxy/${DNSCRYPT_ARCHIVE}
 RUN mkdir /etc/dnscrypt-proxy
-RUN tar -xvf /tmp/dnscrypt-proxy/${DNSCRYPT_ARCHIVE} -C /tmp/dnscrypt-proxy
-RUN mv /tmp/dnscrypt-proxy/linux-x86_64/* /etc/dnscrypt-proxy  # note folder name slightly differs from archive name
+ADD https://github.com/DNSCrypt/dnscrypt-proxy/releases/download/${DNSCRYPT_PROXY_VER}/${ARCHIVE_AMD64_NAME} /tmp/dnscrypt-proxy
+ADD https://github.com/DNSCrypt/dnscrypt-proxy/releases/download/${DNSCRYPT_PROXY_VER}/${ARCHIVE_ARM64_NAME} /tmp/dnscrypt-proxy
+RUN archfile=/tmp/dnscrypt-proxy/${ARCHIVE_AMD64_NAME} \
+  && if [ "${TARGETARCH}" = "arm64"]; then archfile=${ARCHIVE_ARM64_NAME}; fi \
+  && tar -xvf /tmp/dnscrypt-proxy/${ARCHIVE_AMD64_NAME} -C /tmp/dnscrypt-proxy
+RUN mv /tmp/dnscrypt-proxy/linux-*/* /etc/dnscrypt-proxy
 RUN ln -s /etc/dnscrypt-proxy/dnscrypt-proxy /usr/bin/dnscrypt-proxy
 RUN rm -rf /tmp/*
 
@@ -43,7 +51,7 @@ RUN rm -rf /var/lib/apt/lists/*
 ####################
 FROM scratch
 COPY --from=BASE / /
-LABEL maintainer="elgeeko1"
+LABEL maintainer="elgeeko"
 LABEL source="https://github.com/elgeeko1/dnscrypt-proxy-docker"
 
 EXPOSE 5053/udp
