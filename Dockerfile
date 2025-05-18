@@ -1,77 +1,100 @@
+# SPDX-FileCopyrightText: (c) 2023 Jeff C. Jensen.
+# SPDX-License-Identifier: MIT
+
 # syntax=docker/dockerfile:1
 
 ##################
 ## base stage
 ##################
-FROM ubuntu:jammy AS BASE
+ARG BASEIMAGE=ubuntu:noble-20250415.1
+FROM ${BASEIMAGE} AS base
 
 ARG TARGETARCH
-ARG DNSCRYPT_PROXY_VER=2.1.5
+ENV TARGETARCH=${TARGETARCH}
+ARG DNSCRYPT_PROXY_VER=2.1.8
+ARG DNSCRYPT_PROXY_PACKAGE=https://github.com/DNSCrypt/dnscrypt-proxy/releases/download/${DNSCRYPT_PROXY_VER}
 
 USER root
 
 # Preconfigure debconf for non-interactive installation - otherwise complains about terminal
-# Avoid ERROR: invoke-rc.d: policy-rc.d denied execution of start.
+# Avoid ERROR: invoke-rc.d: policy-rc.d denied execution of start, since systemd services aren't installed
 ARG DEBIAN_FRONTEND=noninteractive
-ARG DISPLAY localhost:0.0
-RUN echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
-RUN dpkg-divert --local --rename --add /sbin/initctl
-RUN ln -sf /bin/true /sbin/initctl
-RUN echo "#!/bin/sh\nexit 0" > /usr/sbin/policy-rc.d
+RUN printf '#!/bin/sh\nexit 0\n' > /usr/sbin/policy-rc.d
+RUN chmod +x /usr/sbin/policy-rc.d
 
 # configure apt
-RUN apt-get update -q
+RUN apt-get update -qq
 RUN apt-get install --no-install-recommends -y -q apt-utils 2>&1 \
 	| grep -v "debconf: delaying package configuration"
 RUN apt-get install --no-install-recommends -y -q ca-certificates
 
-# archive URIs
-ENV ARCHIVE_AMD64_NAME=dnscrypt-proxy-linux_x86_64-${DNSCRYPT_PROXY_VER}.tar.gz
-ENV ARCHIVE_ARM64_NAME=dnscrypt-proxy-linux_arm64-${DNSCRYPT_PROXY_VER}.tar.gz
-
 # install dnscrypt-proxy
-RUN mkdir -p /tmp/dnscrypt-proxy
+RUN apt-get install --no-install-recommends -y -q wget
+RUN mkdir -p dnscrypt-proxy
 RUN mkdir /etc/dnscrypt-proxy
-ADD https://github.com/DNSCrypt/dnscrypt-proxy/releases/download/${DNSCRYPT_PROXY_VER}/${ARCHIVE_AMD64_NAME} /tmp/dnscrypt-proxy
-ADD https://github.com/DNSCrypt/dnscrypt-proxy/releases/download/${DNSCRYPT_PROXY_VER}/${ARCHIVE_ARM64_NAME} /tmp/dnscrypt-proxy
-RUN archfile=/tmp/dnscrypt-proxy/${ARCHIVE_AMD64_NAME} \
-  && if [ "${TARGETARCH}" = "arm64"]; then archfile=${ARCHIVE_ARM64_NAME}; fi \
-  && tar -xvf /tmp/dnscrypt-proxy/${ARCHIVE_AMD64_NAME} -C /tmp/dnscrypt-proxy
-RUN mv /tmp/dnscrypt-proxy/linux-*/* /etc/dnscrypt-proxy
+RUN RELEASE_FILENAME=${DNSCRYPT_PROXY_PACKAGE}/$( \
+      case "${TARGETARCH}" in \
+          amd64) echo "dnscrypt-proxy-linux_x86_64-${DNSCRYPT_PROXY_VER}.tar.gz" ;; \
+          *)     echo "dnscrypt-proxy-linux_${TARGETARCH}-${DNSCRYPT_PROXY_VER}.tar.gz" ;; \
+        esac \
+      ) \
+    && echo downloading ${RELEASE_FILENAME} \
+    && wget -qO dnscrypt-proxy-linux-${TARGETARCH}-${DNSCRYPT_PROXY_VER}.tar.gz ${RELEASE_FILENAME}
+RUN tar -xzf dnscrypt-proxy-linux-${TARGETARCH}-${DNSCRYPT_PROXY_VER}.tar.gz -C ./dnscrypt-proxy
+RUN ls -la ./dnscrypt-proxy
+RUN ls -la ./dnscrypt-proxy/linux-*/**
+RUN cp -r ./dnscrypt-proxy/linux-*/* /etc/dnscrypt-proxy/
+RUN ls -la /etc/dnscrypt-proxy/
 RUN ln -s /etc/dnscrypt-proxy/dnscrypt-proxy /usr/bin/dnscrypt-proxy
-RUN rm -rf /tmp/*
-
-# apt cleanup
-RUN apt-get autoremove -y -q
-RUN apt-get -y -q clean
-RUN rm -rf /var/lib/apt/lists/*
 
 ####################
 ## application stage
 ####################
-FROM scratch
-COPY --from=BASE / /
+FROM ${BASEIMAGE}
 LABEL maintainer="elgeeko"
-LABEL source="https://github.com/elgeeko1/dnscrypt-proxy-docker"
+LABEL org.opencontainers.image.title="dnscrypt-proxy 2"
+LABEL org.opencontainers.description="Docker distribution of dnscrypt-proxy 2"
+LABEL org.opencontainers.image.authors="Jeff C. Jensen <11233838+elgeeko1@users.noreply.github.com>"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.version="1.0.0"
+LABEL org.opencontainers.image.url="https://hub.docker.com/r/xronosinc/ansible"
+LABEL org.opencontainers.image.source="https://github.com/elgeeko1/dnscrypt-proxy-docker"
 
 EXPOSE 5053/udp
 EXPOSE 5053/tcp
 
 USER root
 
-# configure container user
-# default to a random UID to prevent collisions with host filesystem (also more secure)
-ARG CONTAINER_USER=dnscrypt
-ENV CONTAINER_USER=${CONTAINER_USER}
-ARG CONTAINER_USER_UID=2000
-ENV CONTAINER_USER_UID=${CONTAINER_USER_UID}
-RUN adduser --disabled-password --gecos "" --shell /bin/bash --uid ${CONTAINER_USER_UID} ${CONTAINER_USER}
+# dnscrypt-proxy required packages
+RUN apt-get update -qq \
+    && apt-get install --no-install-recommends -y -q ca-certificates \
+    && apt-get clean -y -q \
+    && rm -rf /var/lib/apt/lists/*
 
-# configure filesystem
-RUN chown -R dnscrypt:dnscrypt /etc/dnscrypt-proxy \
-  && mkdir -p /var/cache/dnscrypt-proxy \
-  && chown -R dnscrypt:dnscrypt /var/cache/dnscrypt-proxy
+# configure container user
+# default UID unlikely to collide with host filesystem (also more secure)
+ARG CONTAINER_USER=dnscrypt
+ARG CONTAINER_USER_UID=2000
+ENV CONTAINER_USER=${CONTAINER_USER}
+ENV CONTAINER_USER_UID=${CONTAINER_USER_UID}
+RUN useradd --create-home \
+            --uid ${CONTAINER_USER_UID} \
+            --shell /bin/bash \
+            ${CONTAINER_USER}
+
+# copy dnscrypt-proxy from base image
+COPY --from=base \
+     --chown=${CONTAINER_USER}:${CONTAINER_USER} \
+     /etc/dnscrypt-proxy/ \
+     /etc/dnscrypt-proxy/
+COPY --from=base \
+     --chown=${CONTAINER_USER}:${CONTAINER_USER} \
+     /usr/bin/dnscrypt-proxy \
+     /usr/bin/dnscrypt-proxy
+COPY LICENSE /LICENSE
 # persistent cache
+RUN mkdir -p /var/cache/dnscrypt-proxy
+RUN chown ${CONTAINER_USER}:${CONTAINER_USER} /var/cache/dnscrypt-proxy
 VOLUME ["/var/cache/dnscrypt-proxy"]
 
 USER ${CONTAINER_USER}
@@ -79,8 +102,8 @@ WORKDIR /etc/dnscrypt-proxy
 
 # default configuration (quad9)
 COPY app/dnscrypt-proxy.toml /etc/dnscrypt-proxy/dnscrypt-proxy.toml
-
-ENTRYPOINT dnscrypt-proxy
+# copy license for this image
+ENTRYPOINT ["/usr/bin/dnscrypt-proxy"]
 
 HEALTHCHECK --interval=1m --timeout=10s --start-period=10s \
    CMD dnscrypt-proxy -resolve example.com
